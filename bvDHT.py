@@ -52,6 +52,11 @@ def contains():
     pass
 
 def locate():
+    """
+    [Self->Peer] LOCATE
+    [Self->Peer] HashedKey
+    [Peer->Self] PeerAddress
+    """
     pass
 
 def connect():
