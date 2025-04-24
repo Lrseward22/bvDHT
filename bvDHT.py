@@ -1,8 +1,12 @@
 from socket import *
+from sys import argv
+from typing import Tuple
 import threading
 import hashlib
 
-def get_line(conn):
+
+#################### Util Functions #################
+def get_line(conn) -> str:
     msg = b''
     while True:
         ch = conn.recv(1)
@@ -11,11 +15,7 @@ def get_line(conn):
             break
     return msg.decode().strip()
 
-def getHashIndex(addr):
-    b_addrStr = ("%s:%d" % addr).encode()
-    return int.from_bytes(hashlib.sha1(b_addrStr).digest(), byteorder="big")
-
-def recvall(conn, msgLength):
+def recvall(conn, msgLength: int) -> bytes:
     msg = b''
     while len(msg) < msgLength:
         retVal = conn.recv(msgLength - len(msg))
@@ -24,15 +24,124 @@ def recvall(conn, msgLength):
             break    
     return msg
 
-peerInformation = {
+# Hashed key for self connection
+def getHashIndex(addr: Tuple[str, int]) -> int:
+    b_addrStr = ("%s:%d" % addr).encode()
+    return int.from_bytes(hashlib.sha1(b_addrStr).digest(), byteorder="big")
+
+# Hashed key for any string
+def getHashKey(data: str):
+    return int.from_bytes(hashlib.sha1(data.encode()).digest(), byteorder="big")
+
+def update_prev_finger(peerAddr: Tuple[str, int], hashedKey: int) -> bool:
+    print("Updating prev peer.")
+    peerInformation["prev"] = peerAddr
+    return True
+
+# Returns IP address of self
+def getLocalIPAddress() -> str:
+    s = socket(AF_INET, SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    return s.getsockname()[0]
+
+# Returns connection info
+def getClosest(hashedKey: int) -> Tuple[str, int]:
+    closest = Fingers["self"]
+    for key, value in Fingers.items():
+        # update closest if value is closer than closest without
+        # going past the hashed key
+        if hashedKey - value[1] >= 0 and hashedKey - value[1] < hashedKey - closest[1]:
+            closest = value
+    return closest[0]
+
+def ownsData(hashedKey: int) -> bool:
+    return getClosest(hashedKey)[0] == Fingers["self"][0] and getClosest(hashedKey)[1] == Fingers["self"][1] 
+
+#####################################################
+
+
+################# Initial setup #####################
+selfPort = 12345
+sock = socket(AF_INET, SOCK_STREAM)
+sock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+sock.bind( ('', selfPort) )
+sock.listen(16)
+
+selfIP = getLocalIPAddress()
+selfConn = (selfIP, selfPort)
+selfLocation = getHashIndex(selfConn)
+
+# value is a tuple of (connection info, location in DHT)
+Fingers = {
+    "self": None,
     "prev": None,
     "next": None,
-    "address": None,
+    "finger1": None,
+    "finger2": None,
+    "finger3": None,
+    "finger4": None
 }
 
 dhtData = {}
+#####################################################
 
 
+#################### Start New DHT #################
+def createDHT() -> None:
+    print("Starting a new DHT")
+    # Update finger table
+    for key in Fingers:
+        Fingers[key] = (selfConn, selfLocation)
+####################################################
+
+
+################# Locate Protocol #####################
+"""
+[Self->Peer] LOCATE
+[Self->Peer] HashedKey
+[Peer->Self] PeerAddress
+"""
+
+def locate(data: str) -> Tuple[str, int]:
+    # Get the hashed key of data and the closest peer from finger table
+    hashedKey = getHashKey(data)
+    closest = getClosest(hashedKey)
+    # Return the connection info for the closest peer
+    return locate_helper(closest, hashedKey)
+
+def locate_helper(peerConn, hashedKey: int) -> Tuple[str, int]:
+    # Connect to the peer
+    conn = socket(AF_INET, SOCK_STREAM)
+    conn.connect(peerConn)
+
+    # Send command
+    conn.sendall("LOCATE\n".encode())
+    # Send Hashed Key
+    conn.sendall((str(hashedKey) + '\n').encode())
+    # Recieve Peer Address
+    ip, port = get_line(conn).split(':')
+    port = int(port)
+    
+    # If new connection is same as the person you asked
+    # you know they own the data
+    if peerConn[0] == ip and peerConn[1] == port:
+        return (ip, port)
+    # Otherwise try again with the new connection info
+    else:
+        return locate_helper((ip, port), hashedKey)
+
+def handle_locate(conn) -> None:
+    # Recieve Hashed Key
+    hashedKey = int(get_line(conn))
+    # Get closest peer
+    closest = getClosest(hashedKey)
+    closest_str = f"{closest[0]}:{closest[1]}\n"
+    # Send closest peer
+    conn.sendall(closest_str.encode())
+#######################################################
+
+
+#################### Get Protocol #################
 def get():
     """
     [Self->Peer] GET
@@ -42,7 +151,10 @@ def get():
     [Peer->Self] byteArray of ValueData
     """
     pass
+####################################################
 
+
+#################### Insert Protocol #################
 def insert():
     """
     [Self->Peer] INSERT
@@ -53,7 +165,10 @@ def insert():
     [Peer->Self] Acknowledgement of successful INSERT
     """
     pass
+######################################################
 
+
+#################### Remove Protocol #################
 def remove():
     """
     [Self->Peer] REMOVE
@@ -63,7 +178,10 @@ def remove():
     Also acknowledge ‘1’ if key didn’t exist. Remove didn’t fail.
     """
     pass
+######################################################
 
+
+#################### Contains Protocol #################
 def contains():
     """
     [Self->Peer] CONTAINS
@@ -72,16 +190,11 @@ def contains():
     [Peer->Self] Acknowledgement of having entry
     """
     pass
+########################################################
 
-def locate():
-    """
-    [Self->Peer] LOCATE
-    [Self->Peer] HashedKey
-    [Peer->Self] PeerAddress
-    """
-    pass
 
-def connect(selfIP, selfPort, peerAddr):
+################# Connect Protocol #####################
+def connect(peerIP, peerPort):
     """
     [Self->Peer] CONNECT
     [Self->Peer] HashedKey (of Self’s PeerAddress)
@@ -98,17 +211,9 @@ def connect(selfIP, selfPort, peerAddr):
     *** Ownership Officially Transferred by completing this ***
     """
 
-    # Store our address and hash it
-    selfAddr = (selfIP, selfPort)
-    hashedKey = str(getHashIndex(selfAddr))
-
-    # Get the peer address information
-    host, port = peerAddr.split(':')
-    port = int(port)
-
     # Connect to the peer
     conn = socket(AF_INET, SOCK_STREAM)
-    conn.connect((host, port))
+    conn.connect((peerIP, peerPort))
 
     # Send the connect protocol information 
     conn.sendall(b'CONNECT\n')
@@ -139,7 +244,7 @@ def connect(selfIP, selfPort, peerAddr):
 
     # Give the previous peer our information
     conn = socket(AF_INET, SOCK_STREAM)
-    conn.connect((host, port))
+    conn.connect((peerIp, peerPort))
     conn.sendall((f"{selfIP}:{selfPort}\n").encode())
     conn.close()
 
@@ -189,8 +294,10 @@ def handle_connect(conn, addr):
 
     except Exception as e:
         print(f"Error in handle_connect: {e}")
+########################################################
 
 
+################# Disconnect Protocol #####################
 def disconnect():
     """
     [Self->Prev] DISCONNECT
@@ -206,7 +313,10 @@ def disconnect():
     *** Ownership Officially Transferred by completing this ***
     """
     pass
+###########################################################
 
+
+################# Update Prev Protocol #####################
 def update_prev(nextAddr, selfAddr):
     """
     [Self->Next] UPDATE_PREV
@@ -239,7 +349,7 @@ def update_prev(nextAddr, selfAddr):
 def handle_update_prev(conn, update_prev):
     try:
         newPrev = get_line(conn)
-        update = update_prev(newPrev)
+        update = update_prev_finger(newPrev)
 
         if update:
             conn.sendall(b'1\n')
@@ -248,11 +358,7 @@ def handle_update_prev(conn, update_prev):
     except Exception as e:
         print(f"Error: {e}")
         conn.sendall(b'0\n')
-
-def update_prev(peerAddr):
-    print("Updating prev peer.")
-    peerInformation["prev"] = peerAddr
-    return True
+############################################################
 
 def handle_connection(conn, addr):
     try:
@@ -276,8 +382,7 @@ def handle_connection(conn, addr):
             # TODO:
             pass
         elif command == "LOCATE":
-            # TODO: 
-            pass
+            handle_locate(conn)
         elif command == "DISCONNECT":
             # TODO: 
             pass
@@ -291,23 +396,51 @@ def handle_connection(conn, addr):
         conn.close()
 
 
-def listener(server_socket):
+def listener():
     while True:
-        conn, addr = server_socket.accept()
-        threading.Thread(target=handle_connection, args=(conn, addr)).start()
-
-# Initial setup
-port = 12345
-socket = socket(AF_INET, SOCK_STREAM)
-socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-socket.bind( ('', port) )
-socket.listen(16)
+        threading.Thread(target=handle_connection, args=(*sock.accept(),), daemon=True).start()
 
 print("DHT Running...")
-print("Listening on port:", port)
+print("IP Address:", selfIP)
+print("Listening on port:", selfPort)
 
 try:
-    listener(socket)
+    if len(argv) >= 2:
+        peerIP = argv[1]
+        peerPort = argv[2]
+        connect(peerIP, peerPort)
+    else:
+        createDHT()
+        
+    threading.Thread(target=listener, args=(), daemon=True).start()
+
+    while True:
+        command = input()
+        if ' ' in command:
+            action, data = command.split(' ', 1)
+        else:
+            action = command
+            data = ''
+        print(action)
+        if action == "get":
+            # TODO:
+            pass
+        elif action == "locate":
+            locate(data)
+        elif action == "insert":
+            # TODO: 
+            pass
+        elif action == "remove":
+            # TODO
+            pass
+        elif action == "contains":
+            # TODO:
+            pass
+        elif action == "disconnect":
+            # TODO: 
+            pass
+        else:
+            print(f"Unknown command: {command}")
 except KeyboardInterrupt:
     print("\n DHT Shutting Down...")
-    socket.close()
+    sock.close()
