@@ -199,8 +199,53 @@ def handle_locate(conn: socket) -> None:
 [Peer->Self] byteArray of ValueData
 """
 
-def get():
-    pass
+def get(key: str) -> str:
+    hashedKey = getHashKey(key)
+    ack = None
+    while ack != '1':
+        # Get peer we think owns data
+        peer = locate(hashedKey)
+
+        # Connect to peer
+        peerConn = socket(AF_INET, SOCK_STREAM)
+        peerConn.connect(peer)
+
+        # Send the connect protocol information 
+        peerConn.sendall(b'GET\n')
+        peerConn.sendall((str(hashedKey) + '\n').encode())
+
+        # Get acknowledgement of ownership of space
+        ack = get_line(peerConn)
+        if ack != '1':
+            conn.close()
+
+    # Get length of data and data of that length
+    dataSize = int(get_line(peerConn))
+    if dataSize == 0:
+        print("No data found...")
+        data = ''
+    else:
+        data = recvall(peerConn, dataSize).decode()
+        print(data)
+    peerConn.close()
+    return data
+
+def handle_get(conn: socket) -> None:
+    hashedKey = int(get_line(conn))
+    # Send ack of ownership of space
+    if not ownsData(hashedKey):
+        conn.sendall(b'0\n')
+        conn.close()
+        return
+    conn.sendall(b'1\n')
+
+    # Send len of data followed by data. 0 if not found
+    if hashedKey in dhtData:
+        conn.sendall((str(len(dhtData[hashedKey])) + '\n').encode())
+        conn.sendall(dhtData[hashedKey].encode())
+    else:
+        conn.sendall(b'0\n')
+    conn.close()
 ####################################################
 
 
@@ -214,7 +259,7 @@ def get():
 [Peer->Self] Acknowledgement of successful INSERT
 """
 
-def insert(key: str, data: str) -> None:
+def insert(key: str, data: str) -> bool:
     hashedKey = getHashKey(key)
     ack = None
     while ack != '1':
@@ -243,6 +288,8 @@ def insert(key: str, data: str) -> None:
     peerConn.close()
     if ack != '1':
         print("Error: issue inserting data")
+        return False
+    return True
 
 def handle_insert(conn: socket) -> None:
     hashedKey = int(get_line(conn))
@@ -274,8 +321,55 @@ def handle_insert(conn: socket) -> None:
 Also acknowledge ‘1’ if key didn’t exist. Remove didn’t fail.
 """
 
-def remove():
-    pass
+def remove(key: str) -> bool:
+    hashedKey = getHashKey(key)
+    ack = None
+    while ack != '1':
+        # Get peer we think owns data
+        peer = locate(hashedKey)
+
+        # Connect to peer
+        peerConn = socket(AF_INET, SOCK_STREAM)
+        peerConn.connect(peer)
+
+        # Send the connect protocol information 
+        peerConn.sendall(b'REMOVE\n')
+        peerConn.sendall((str(hashedKey) + '\n').encode())
+
+        # Get acknowledgement of ownership of space
+        ack = get_line(peerConn)
+        if ack != '1':
+            conn.close()
+
+    # Get ack of successful removal
+    ack = get_line(peerConn)
+    peerConn.close()
+    if ack == '1':
+        print("Successfully removed!")
+        return True
+    else:
+        print(f"Error removing {key}")
+        return False
+
+def handle_remove(conn: socket) -> None:
+    hashedKey = int(get_line(conn))
+    # Send ack of ownership of space
+    if not ownsData(hashedKey):
+        conn.sendall(b'0\n')
+        conn.close()
+        return
+    conn.sendall(b'1\n')
+
+    # Remove data and send 1 if successful, 0 if not
+    try:
+        if hashedKey in dhtData:
+            dhtData.pop(hashedKey)
+        conn.sendall(b'1\n')
+    except Exception as e:
+        print(f"Error: {e}")
+        conn.sendall(b'0\n')
+    finally:
+        conn.close()
 ######################################################
 
 
@@ -287,8 +381,51 @@ def remove():
 [Peer->Self] Acknowledgement of having entry
 """
 
-def contains():
-    pass
+def contains(key: str) -> bool:
+    hashedKey = getHashKey(key)
+    ack = None
+    while ack != '1':
+        # Get peer we think owns data
+        peer = locate(hashedKey)
+
+        # Connect to peer
+        peerConn = socket(AF_INET, SOCK_STREAM)
+        peerConn.connect(peer)
+
+        # Send the connect protocol information 
+        peerConn.sendall(b'CONTAINS\n')
+        peerConn.sendall((str(hashedKey) + '\n').encode())
+
+        # Get acknowledgement of ownership of space
+        ack = get_line(peerConn)
+        if ack != '1':
+            conn.close()
+
+    # Get ack of having data
+    ack = get_line(peerConn)
+    peerConn.close()
+    if ack == '1':
+        print("true")
+        return True
+    else:
+        print("false")
+        return False
+
+def handle_contains(conn: socket) -> None:
+    hashedKey = int(get_line(conn))
+    # Send ack of ownership of space
+    if not ownsData(hashedKey):
+        conn.sendall(b'0\n')
+        conn.close()
+        return
+    conn.sendall(b'1\n')
+
+    # Send ack of having data
+    if hashedKey in dhtData:
+        conn.sendall(b'1\n')
+    else:
+        conn.sendall(b'0\n')
+    conn.close()
 ########################################################
 
 
@@ -309,7 +446,7 @@ Self->Peer] PeerAddress of Self
 *** Ownership Officially Transferred by completing this ***
 """
 
-def connect(peerIP: str, peerPort: int):
+def connect(peerIP: str, peerPort: int) -> None:
     # Put self in finger table
     Fingers["self"] = (selfConn, selfLocation)
 
@@ -464,16 +601,13 @@ def handle_connection(conn, addr):
         elif command == "UPDATE_PREV":
             handle_update_prev(conn)
         elif command == "GET":
-            # TODO:
-            pass
+            handle_get(conn)
         elif command == "INSERT":
             handle_insert(conn)
         elif command == "REMOVE":
-            # TODO:
-            pass
+            handle_remove(conn)
         elif command == "CONTAINS":
-            # TODO:
-            pass
+            handle_contains(conn)
         elif command == "LOCATE":
             handle_locate(conn)
         elif command == "DISCONNECT":
@@ -516,19 +650,16 @@ try:
             data = ''
         print(action)
         if action == "get":
-            # TODO:
-            pass
+            get(data)
         elif action == "locate":
             locate(data)
         elif action == "insert":
             key, value = data.split(',', 1)
             insert(key, value)
         elif action == "remove":
-            # TODO
-            pass
+            remove(data)
         elif action == "contains":
-            # TODO:
-            pass
+            contains(data)
         elif action == "disconnect":
             # TODO: 
             pass
