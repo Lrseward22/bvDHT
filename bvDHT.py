@@ -91,6 +91,10 @@ def printFingers() -> None:
     for key, value in Fingers.items():
         if value:
             print(f"{key}- {value[0][0]}:{value[0][1]} at {value[1]}")
+
+def printData() -> None:
+    for key, value in dhtData.items():
+        print(f"{key} : {value}")
 #####################################################
 
 
@@ -210,8 +214,54 @@ def get():
 [Peer->Self] Acknowledgement of successful INSERT
 """
 
-def insert():
-    pass
+def insert(key: str, data: str) -> None:
+    hashedKey = getHashKey(key)
+    ack = None
+    while ack != '1':
+        # Get peer we think owns data
+        peer = locate(hashedKey)
+
+        # Connect to peer
+        peerConn = socket(AF_INET, SOCK_STREAM)
+        peerConn.connect(peer)
+
+        # Send the connect protocol information 
+        peerConn.sendall(b'INSERT\n')
+        peerConn.sendall((str(hashedKey) + '\n').encode())
+
+        # Get acknowledgement of ownership of space
+        ack = get_line(peerConn)
+        if ack != '1':
+            conn.close()
+
+    # Send length of data followed by data
+    peerConn.sendall((str(len(data)) + '\n').encode())
+    peerConn.sendall(data.encode())
+
+    # Get ack of successful insert
+    ack = get_line(peerConn)
+    peerConn.close()
+    if ack != '1':
+        print("Error: issue inserting data")
+
+def handle_insert(conn: socket) -> None:
+    hashedKey = int(get_line(conn))
+    # Send ack of ownership of space
+    if not ownsData(hashedKey):
+        conn.sendall(b'0\n')
+        conn.close()
+        return
+    conn.sendall(b'1\n')
+
+    # Get data
+    dataSize = int(get_line(conn))
+    data = recvall(conn, dataSize)
+
+    # Put data into local storage
+    dhtData[hashedKey] = data.decode()
+    # Send ack of successful insertion
+    conn.sendall(b'1\n')
+    conn.close()
 ######################################################
 
 
@@ -417,8 +467,7 @@ def handle_connection(conn, addr):
             # TODO:
             pass
         elif command == "INSERT":
-            # TODO: 
-            pass
+            handle_insert(conn)
         elif command == "REMOVE":
             # TODO:
             pass
@@ -471,13 +520,9 @@ try:
             pass
         elif action == "locate":
             locate(data)
-        elif action == "updateFingers":
-            updateFingers()
-        elif action == "printFingers":
-            printFingers()
         elif action == "insert":
-            # TODO: 
-            pass
+            key, value = data.split(',', 1)
+            insert(key, value)
         elif action == "remove":
             # TODO
             pass
@@ -487,6 +532,13 @@ try:
         elif action == "disconnect":
             # TODO: 
             pass
+        ### Helpful function to test
+        elif action == "updateFingers":
+            updateFingers()
+        elif action == "printFingers":
+            printFingers()
+        elif action == "getData":
+            printData()
         else:
             print(f"Unknown command: {command}")
 except KeyboardInterrupt:
