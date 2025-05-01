@@ -217,7 +217,7 @@ def get(key: str) -> str:
         # Get acknowledgement of ownership of space
         ack = get_line(peerConn)
         if ack != '1':
-            conn.close()
+            peerConn.close()
 
     # Get length of data and data of that length
     dataSize = int(get_line(peerConn))
@@ -277,7 +277,7 @@ def insert(key: str, data: str) -> bool:
         # Get acknowledgement of ownership of space
         ack = get_line(peerConn)
         if ack != '1':
-            conn.close()
+            peerConn.close()
 
     # Send length of data followed by data
     peerConn.sendall((str(len(data)) + '\n').encode())
@@ -339,7 +339,7 @@ def remove(key: str) -> bool:
         # Get acknowledgement of ownership of space
         ack = get_line(peerConn)
         if ack != '1':
-            conn.close()
+            peerConn.close()
 
     # Get ack of successful removal
     ack = get_line(peerConn)
@@ -399,7 +399,7 @@ def contains(key: str) -> bool:
         # Get acknowledgement of ownership of space
         ack = get_line(peerConn)
         if ack != '1':
-            conn.close()
+            peerConn.close()
 
     # Get ack of having data
     ack = get_line(peerConn)
@@ -450,7 +450,7 @@ def connect(peerIP: str, peerPort: int) -> None:
     # Put self in finger table
     Fingers["self"] = (selfConn, selfLocation)
 
-    addrStr = ("%s:%d" % selfConn)
+    addrStr = "%s:%d" % selfConn
     ack = None
     while ack != '1':
         # Find your spot in the DHT
@@ -544,8 +544,48 @@ Prev performs UpdatePrev on Next
 *** Ownership Officially Transferred by completing this ***
 """
 
-def disconnect():
-    pass
+def disconnect() -> None:
+    print("Disconnecting from DHT...")
+
+    # Transfer data to next peer
+    next_peer = Fingers["next"]
+    if next_peer and next_peer != Fingers["self"]:
+        conn = socket(AF_INET, SOCK_STREAM)
+        conn.connect(next_peer[0])
+
+        # Send insert command for each entry
+        for hashedKey, value in dhtData.items():
+            conn.sendall(b'INSERT\n')
+            conn.sendall((str(hashedKey) + '\n').encode())
+            conn.sendall((str(len(value)) + '\n').encode())
+            conn.sendall(value.encode())
+            ack = get_line(conn)
+            if ack != '1':
+                print(f"Failed to transfer key {hashedKey} to next node.")
+        conn.close()
+
+        # Notify next node to update its prev pointer
+        conn = socket(AF_INET, SOCK_STREAM)
+        conn.connect(next_peer[0])
+        conn.sendall(b'UPDATEPREV\n')
+        conn.sendall(("%s:%d\n" % Fingers["prev"][0]).encode())
+        conn.close()
+
+    # Notify prev node to update its next pointer
+    prev_peer = Fingers["prev"]
+    if prev_peer and prev_peer != Fingers["self"]:
+        conn = socket(AF_INET, SOCK_STREAM)
+        conn.connect(prev_peer[0])
+        conn.sendall(b'UPDATENEXT\n')
+        conn.sendall(("%s:%d\n" % Fingers["next"][0]).encode())
+        conn.close()
+
+    # Clear finger table and data
+    for key in Fingers.keys():
+        Fingers[key] = None
+    dhtData.clear()
+
+    print("Disconnected.")
 ###########################################################
 
 
@@ -622,6 +662,15 @@ def handle_connection(conn, addr):
     finally:
         conn.close()
 
+def print_help() -> None:
+    print("Available commands:")
+    print("/insert <key> <value>  - Insert a key-value pair into the DHT")
+    print("/get <key>             - Retrieve the value for a key")
+    print("/remove <key>          - Remove a key-value pair")
+    print("/contains <key>        - Check if a key exists in the DHT")
+    print("/disconnect            - Gracefully leave the DHT")
+    print("/help                  - Show this help message")
+
 
 def listener():
     while True:
@@ -670,8 +719,11 @@ try:
             printFingers()
         elif action == "getData":
             printData()
+        elif action == "/help":
+            print_help()
         else:
             print(f"Unknown command: {command}")
+            print_help()
 except KeyboardInterrupt:
     print("\n DHT Shutting Down...")
     sock.close()
