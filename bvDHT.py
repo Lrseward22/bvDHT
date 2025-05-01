@@ -710,8 +710,7 @@ try:
         elif action == "contains":
             contains(data)
         elif action == "disconnect":
-            # TODO: 
-            pass
+            disconnect()
         ### Helpful function to test
         elif action == "updateFingers":
             updateFingers()
