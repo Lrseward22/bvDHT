@@ -544,7 +544,7 @@ Prev performs UpdatePrev on Next
 *** Ownership Officially Transferred by completing this ***
 """
 
-def disconnect() -> None:
+def disconnect():
     print("Disconnecting from DHT...")
 
     # Transfer data to next peer
