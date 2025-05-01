@@ -662,7 +662,7 @@ def handle_connection(conn, addr):
     finally:
         conn.close()
 
-def print_help() -> None:
+def print_help():
     print("Available commands:")
     print("/insert <key> <value>  - Insert a key-value pair into the DHT")
     print("/get <key>             - Retrieve the value for a key")
