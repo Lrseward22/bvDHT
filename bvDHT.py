@@ -1,8 +1,9 @@
 from socket import *
 from sys import argv
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 import threading
 import hashlib
+import random
 
 MAXHASH = 2**160 - 1
 
@@ -472,9 +473,9 @@ def connect(peerIP: str, peerPort: int) -> None:
     # Receive data
     numEntries = int(get_line(conn))
     for i in range(numEntries):
-        key = get_line(conn)
+        key = int(get_line(conn))
         itemLen = int(get_line(conn))
-        item = recvall(conn, itemLen)
+        item = recvall(conn, itemLen).decode()
         dhtData[key] = item
 
     # Get address of the next peer
@@ -496,10 +497,8 @@ def connect(peerIP: str, peerPort: int) -> None:
 def handle_connect(conn: socket):
     try:
         hashedKey = int(get_line(conn))
-        print(f"\nConnect request from key: {hashedKey}")
 
         if not ownsData(hashedKey):
-            print("Does not own space for this key. Rejecting.")
             conn.sendall(b'0\n')
             conn.close()
             return
@@ -511,7 +510,7 @@ def handle_connect(conn: socket):
         for key, val in dhtData.items():
             conn.sendall(f"{key}\n".encode())
             conn.sendall(f"{len(val)}\n".encode())
-            conn.sendall(val)
+            conn.sendall(val.encode())
 
         if Fingers["next"]:
             nextConn = Fingers["next"][0]
@@ -544,48 +543,70 @@ Prev performs UpdatePrev on Next
 *** Ownership Officially Transferred by completing this ***
 """
 
-def disconnect():
+def disconnect() -> None:
     print("Disconnecting from DHT...")
 
-    # Transfer data to next peer
-    next_peer = Fingers["next"]
-    if next_peer and next_peer != Fingers["self"]:
-        conn = socket(AF_INET, SOCK_STREAM)
-        conn.connect(next_peer[0])
+    # Transfer data to prev peer
+    prev = Fingers["prev"]
+    nextPeer = Fingers["next"]
+    # If you are only one in the DHT nothing else to do
+    if prev[1] == Fingers["self"][1]:
+        return
 
-        # Send insert command for each entry
-        for hashedKey, value in dhtData.items():
-            conn.sendall(b'INSERT\n')
-            conn.sendall((str(hashedKey) + '\n').encode())
-            conn.sendall((str(len(value)) + '\n').encode())
-            conn.sendall(value.encode())
-            ack = get_line(conn)
-            if ack != '1':
-                print(f"Failed to transfer key {hashedKey} to next node.")
+    ack = None
+    while ack != '1':
+        conn = socket(AF_INET, SOCK_STREAM)
+        conn.connect(prev[0])
+        conn.sendall(b'DISCONNECT\n')
+
+        # Send next finger address as {IP}:{PORT}
+        conn.sendall((f"{nextPeer[0][0]}:{nextPeer[0][1]}\n").encode())
+
+        # Send number of entries we own
+        conn.sendall((str(len(dhtData)) + '\n').encode())
+
+        # Send hashed key, length of the data, and the data itself
+        for key, data in dhtData.items():
+            conn.sendall((str(key) + '\n').encode())
+            conn.sendall((str(len(data)) + '\n').encode())
+            conn.sendall(data.encode())
+
+        # Get ack of successful transfer
+        ack = get_line(conn)
+
+        # Done with prev
         conn.close()
 
-        # Notify next node to update its prev pointer
-        conn = socket(AF_INET, SOCK_STREAM)
-        conn.connect(next_peer[0])
-        conn.sendall(b'UPDATEPREV\n')
-        conn.sendall(("%s:%d\n" % Fingers["prev"][0]).encode())
-        conn.close()
+    # Update prev finger for our next
+    update_prev(nextPeer[0], prev[0])
 
-    # Notify prev node to update its next pointer
-    prev_peer = Fingers["prev"]
-    if prev_peer and prev_peer != Fingers["self"]:
-        conn = socket(AF_INET, SOCK_STREAM)
-        conn.connect(prev_peer[0])
-        conn.sendall(b'UPDATENEXT\n')
-        conn.sendall(("%s:%d\n" % Fingers["next"][0]).encode())
-        conn.close()
+    print("Disconnected")
 
-    # Clear finger table and data
-    for key in Fingers.keys():
-        Fingers[key] = None
-    dhtData.clear()
+def handle_disconnect(conn: socket) -> None:
+    # Get ip and port of new next Finger
+    try:
+        ip, port = get_line(conn).split(':')
+        port = int(port)
+        
+        # Update Fingers
+        Fingers["next"] = ((ip, port), getHashIndex((ip, port)))
 
-    print("Disconnected.")
+        ### Transfer entries into our local storage
+        # Get num entries
+        n = int(get_line(conn))
+
+        # Receive hashed key, length of data, and data for each entry
+        for i in range(n):
+            hashedKey = int(get_line(conn))
+            dataSize = int(get_line(conn))
+            data = recvall(conn, dataSize).decode()
+            dhtData[hashedKey] = data
+
+        # Send ACK of successful transfer
+        conn.sendall(b'1\n')
+    except Exception as e:
+        print(e)
+
 ###########################################################
 
 
@@ -596,22 +617,20 @@ def disconnect():
 [Next->Self] Acknowledgement
 """
 
-def update_prev(nextAddr: Tuple[str, int]) -> None:
+def update_prev(nextAddr: Tuple[str, int], prevAddr: Optional[Tuple[str, int]] = selfConn) -> None:
     try:
         conn = socket(AF_INET, SOCK_STREAM)
         conn.connect(nextAddr)
 
         conn.sendall(b"UPDATE_PREV\n")
-        conn.sendall((f"{selfConn[0]}:{selfConn[1]}\n").encode())
+        conn.sendall((f"{prevAddr[0]}:{prevAddr[1]}\n").encode())
 
         ack = get_line(conn)
         conn.close()
 
         if ack == '1':
-            print(f"Successfully udpates prev for {nextAddr}.")
             return True
         else:
-            print(f"Failed to update prev for {nextAddr}.")
             return False
     except Exception as e:
         print(f"Error: {e}")
@@ -634,7 +653,10 @@ def handle_update_prev(conn: socket):
 def handle_connection(conn, addr):
     try:
         command = get_line(conn)
-        print(f"Received command: {command} from {addr}")
+
+        # Sometimes update Finger table
+        if random.random() < 0.1:
+            updateFingers()
 
         if command == "CONNECT":
             handle_connect(conn)
@@ -651,11 +673,7 @@ def handle_connection(conn, addr):
         elif command == "LOCATE":
             handle_locate(conn)
         elif command == "DISCONNECT":
-            # TODO: 
-            pass
-        else:
-            print(f"Unknown command: {command}")
-            conn.sendall(b'ERROR\n')
+            handle_disconnect(conn)
 
     except Exception as e:
         print(f"Error handling connection from {addr}: {e}")
@@ -663,13 +681,13 @@ def handle_connection(conn, addr):
         conn.close()
 
 def print_help():
-    print("Available commands:")
-    print("/insert <key> <value>  - Insert a key-value pair into the DHT")
-    print("/get <key>             - Retrieve the value for a key")
-    print("/remove <key>          - Remove a key-value pair")
-    print("/contains <key>        - Check if a key exists in the DHT")
-    print("/disconnect            - Gracefully leave the DHT")
-    print("/help                  - Show this help message")
+    print("vailable commands:")
+    print("insert <key>,<value>  - Insert a key-value pair into the DHT")
+    print("get <key>             - Retrieve the value for a key")
+    print("remove <key>          - Remove a key-value pair")
+    print("contains <key>        - Check if a key exists in the DHT")
+    print("disconnect            - Gracefully leave the DHT")
+    print("help                  - Show this help message")
 
 
 def listener():
@@ -697,7 +715,6 @@ try:
         else:
             action = command
             data = ''
-        print(action)
         if action == "get":
             get(data)
         elif action == "locate":
@@ -711,6 +728,7 @@ try:
             contains(data)
         elif action == "disconnect":
             disconnect()
+            exit(0)
         ### Helpful function to test
         elif action == "updateFingers":
             updateFingers()
@@ -718,7 +736,7 @@ try:
             printFingers()
         elif action == "getData":
             printData()
-        elif action == "/help":
+        elif action == "help":
             print_help()
         else:
             print(f"Unknown command: {command}")
